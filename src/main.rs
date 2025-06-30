@@ -9,6 +9,7 @@ use solana_sdk::signature::Signature;
 use solana_sdk::signer::Signer;
 use solana_sdk::signer::keypair::Keypair;
 use spl_token::instruction::initialize_mint;
+use spl_token::instruction::mint_to;
 use std::str::FromStr;
 
 #[derive(Serialize)]
@@ -258,6 +259,80 @@ async fn verify_message(req: web::Json<VerifyMessageRequest>) -> impl Responder 
     }
 }
 
+#[derive(Deserialize)]
+struct MintTokenRequest {
+    mint: String,
+    destination: String,
+    authority: String,
+    amount: u64,
+}
+
+#[derive(Serialize)]
+struct AccountMetaJsonForMint {
+    pubkey: String,
+    is_signer: bool,
+    is_writable: bool,
+}
+
+#[derive(Serialize)]
+struct InstructionJsonForMint {
+    program_id: String,
+    accounts: Vec<AccountMetaJsonForMint>,
+    instruction_data: String,
+}
+
+#[derive(Serialize)]
+struct MintTokenResponse {
+    success: bool,
+    data: InstructionJsonForMint,
+}
+
+#[post("/token/mint")]
+async fn mint_token(req: web::Json<MintTokenRequest>) -> impl Responder {
+    let result = (|| -> Result<MintTokenResponse, Box<dyn std::error::Error>> {
+        // Parse all pubkeys from base58 strings
+        let mint = Pubkey::from_str(&req.mint)?;
+        let destination = Pubkey::from_str(&req.destination)?;
+        let authority = Pubkey::from_str(&req.authority)?;
+
+        let ix = mint_to(
+            &spl_token::id(),
+            &mint,
+            &destination,
+            &authority,
+            &[],
+            req.amount,
+        )?;
+
+        let accounts = ix
+            .accounts
+            .iter()
+            .map(|meta| AccountMetaJsonForMint {
+                pubkey: meta.pubkey.to_string(),
+                is_signer: meta.is_signer,
+                is_writable: meta.is_writable,
+            })
+            .collect();
+
+        Ok(MintTokenResponse {
+            success: true,
+            data: InstructionJsonForMint {
+                program_id: ix.program_id.to_string(),
+                accounts,
+                instruction_data: STANDARD.encode(&ix.data),
+            },
+        })
+    })();
+
+    match result {
+        Ok(res) => HttpResponse::Ok().json(res),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
@@ -267,6 +342,7 @@ async fn main() -> std::io::Result<()> {
             .service(create_token)
             .service(sign_message)
             .service(verify_message)
+            .service(mint_token)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
