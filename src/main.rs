@@ -1,19 +1,57 @@
-use actix_web::{App, HttpServer, Responder, get, post, web};
-use serde::Deserialize;
+use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
+use serde::{Deserialize, Serialize};
+use solana_sdk::signature::{Keypair, Signer};
+
+#[derive(Serialize)]
+struct Greeting {
+    message: String,
+}
 
 #[get("/hello/{name}")]
 async fn greet(name: web::Path<String>) -> impl Responder {
-    format!("Hello {name}!")
+    let response = Greeting {
+        message: format!("Hello {}!", name),
+    };
+    web::Json(response)
 }
 
-#[derive(Deserialize)]
-struct NamePayload {
-    name: String,
+#[derive(Serialize)]
+struct GenerateKeypairResponse {
+    success: bool,
+    data: GenerateKeypairData,
 }
 
-#[post("/hello")]
-async fn greet_post(payload: web::Json<NamePayload>) -> impl Responder {
-    format!("Hello {}!", payload.name)
+#[derive(Serialize)]
+struct GenerateKeypairData {
+    pubkey: String,
+    secret: String,
+}
+
+#[post("/keypair")]
+async fn greet_post() -> Result<impl Responder, actix_web::Error> {
+    let result = (|| {
+        let keypair = Keypair::new();
+
+        Ok::<_, Box<dyn std::error::Error>>(GenerateKeypairResponse {
+            success: true,
+            data: GenerateKeypairData {
+                pubkey: bs58::encode(keypair.pubkey().to_bytes()).into_string(),
+                secret: bs58::encode(keypair.to_bytes()).into_string(),
+            },
+        })
+    })();
+
+    match result {
+        Ok(response) => Ok(HttpResponse::Ok().json(response)),
+        Err(e) => {
+            let error_message = format!("Keypair generation failed: {}", e);
+            let error_response = HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": error_message
+            }));
+            Ok(error_response)
+        }
+    }
 }
 
 #[actix_web::main]
