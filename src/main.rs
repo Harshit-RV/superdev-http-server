@@ -4,7 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bs58;
 use serde::{Deserialize, Serialize};
-use solana_program::{instruction::Instruction, pubkey::Pubkey};
+use solana_program::{instruction::Instruction, pubkey::Pubkey, system_instruction};
 use solana_sdk::signature::Signature;
 use solana_sdk::signer::Signer;
 use solana_sdk::signer::keypair::Keypair;
@@ -268,23 +268,9 @@ struct MintTokenRequest {
 }
 
 #[derive(Serialize)]
-struct AccountMetaJsonForMint {
-    pubkey: String,
-    is_signer: bool,
-    is_writable: bool,
-}
-
-#[derive(Serialize)]
-struct InstructionJsonForMint {
-    program_id: String,
-    accounts: Vec<AccountMetaJsonForMint>,
-    instruction_data: String,
-}
-
-#[derive(Serialize)]
 struct MintTokenResponse {
     success: bool,
-    data: InstructionJsonForMint,
+    data: InstructionJson,
 }
 
 #[post("/token/mint")]
@@ -307,7 +293,7 @@ async fn mint_token(req: web::Json<MintTokenRequest>) -> impl Responder {
         let accounts = ix
             .accounts
             .iter()
-            .map(|meta| AccountMetaJsonForMint {
+            .map(|meta| AccountMetaJson {
                 pubkey: meta.pubkey.to_string(),
                 is_signer: meta.is_signer,
                 is_writable: meta.is_writable,
@@ -316,10 +302,64 @@ async fn mint_token(req: web::Json<MintTokenRequest>) -> impl Responder {
 
         Ok(MintTokenResponse {
             success: true,
-            data: InstructionJsonForMint {
+            data: InstructionJson {
                 program_id: ix.program_id.to_string(),
                 accounts,
                 instruction_data: STANDARD.encode(&ix.data),
+            },
+        })
+    })();
+
+    match result {
+        Ok(res) => HttpResponse::Ok().json(res),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+#[derive(Deserialize)]
+struct SendSolRequest {
+    from: String,
+    to: String,
+    lamports: u64,
+}
+
+#[derive(Serialize)]
+struct SendSolResponse {
+    success: bool,
+    data: InstructionJson,
+}
+
+#[post("/send/sol")]
+async fn send_sol(req: web::Json<SendSolRequest>) -> impl Responder {
+    let result = (|| -> Result<SendSolResponse, Box<dyn std::error::Error>> {
+        if req.lamports == 0 {
+            return Err("Lamports must be greater than 0".into());
+        }
+
+        let from_pubkey = Pubkey::from_str(&req.from)?;
+        let to_pubkey = Pubkey::from_str(&req.to)?;
+
+        let ix = system_instruction::transfer(&from_pubkey, &to_pubkey, req.lamports);
+
+        let accounts = ix
+            .accounts
+            .iter()
+            .map(|meta| AccountMetaJson {
+                pubkey: meta.pubkey.to_string(),
+                is_signer: meta.is_signer,
+                is_writable: meta.is_writable,
+            })
+            .collect();
+
+        Ok(SendSolResponse {
+            success: true,
+            data: InstructionJson {
+                program_id: ix.program_id.to_string(),
+                accounts,
+                instruction_data: STANDARD.encode(ix.data),
             },
         })
     })();
@@ -343,6 +383,7 @@ async fn main() -> std::io::Result<()> {
             .service(sign_message)
             .service(verify_message)
             .service(mint_token)
+            .service(send_sol)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
