@@ -13,6 +13,22 @@ use spl_token::instruction::mint_to;
 use spl_token::instruction::transfer;
 use std::str::FromStr;
 
+fn validate_pubkey(pubkey_str: &str) -> Result<Pubkey, &'static str> {
+    Pubkey::from_str(pubkey_str).map_err(|_| "Invalid public key format")
+}
+
+fn validate_secret_key(secret_str: &str) -> Result<Vec<u8>, &'static str> {
+    let secret_bytes = bs58::decode(secret_str)
+        .into_vec()
+        .map_err(|_| "Invalid base58 secret key")?;
+
+    if secret_bytes.len() != 64 {
+        return Err("Secret key must be 64 bytes");
+    }
+
+    Ok(secret_bytes)
+}
+
 #[derive(Serialize)]
 struct Greeting {
     message: String,
@@ -67,7 +83,8 @@ async fn greet_post() -> Result<impl Responder, actix_web::Error> {
 
 #[derive(Deserialize)]
 struct CreateTokenRequest {
-    mintAuthority: String,
+    #[serde(rename = "mintAuthority")]
+    mint_authority: String,
     mint: String,
     decimals: u8,
 }
@@ -95,8 +112,12 @@ struct CreateTokenResponse {
 #[post("/token/create")]
 async fn create_token(req: web::Json<CreateTokenRequest>) -> impl Responder {
     let result = (|| -> Result<CreateTokenResponse, Box<dyn std::error::Error>> {
-        let mint_pubkey = Pubkey::from_str(&req.mint)?;
-        let mint_authority_pubkey = Pubkey::from_str(&req.mintAuthority)?;
+        if req.mint_authority.is_empty() || req.mint.is_empty() {
+            return Err("Missing required fields".into());
+        }
+
+        let mint_pubkey = validate_pubkey(&req.mint)?;
+        let mint_authority_pubkey = validate_pubkey(&req.mint_authority)?;
 
         let ix: Instruction = initialize_mint(
             &spl_token::id(),
@@ -121,7 +142,7 @@ async fn create_token(req: web::Json<CreateTokenRequest>) -> impl Responder {
             data: InstructionJson {
                 program_id: ix.program_id.to_string(),
                 accounts,
-                instruction_data: STANDARD.encode(ix.data),
+                instruction_data: STANDARD.encode(ix.data.as_slice()),
             },
         })
     })();
@@ -151,63 +172,40 @@ struct SignMessageData {
 #[derive(Serialize)]
 struct SignMessageResponse {
     success: bool,
-    data: Option<SignMessageData>,
-    error: Option<String>,
+    data: SignMessageData,
 }
 
 #[post("/message/sign")]
 async fn sign_message(req: web::Json<SignMessageRequest>) -> impl Responder {
-    if req.message.is_empty() || req.secret.is_empty() {
-        return HttpResponse::BadRequest().json(SignMessageResponse {
-            success: false,
-            data: None,
-            error: Some("Missing required fields".to_string()),
-        });
-    }
-
-    let secret_bytes = match bs58::decode(&req.secret).into_vec() {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return HttpResponse::BadRequest().json(SignMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Invalid base58 secret key".to_string()),
-            });
+    let result = (|| -> Result<SignMessageResponse, Box<dyn std::error::Error>> {
+        if req.message.is_empty() || req.secret.is_empty() {
+            return Err("Missing required fields".into());
         }
-    };
 
-    if secret_bytes.len() != 64 {
-        return HttpResponse::BadRequest().json(SignMessageResponse {
-            success: false,
-            data: None,
-            error: Some("Secret key must be 64 bytes (base58-encoded)".to_string()),
-        });
+        let secret_bytes = validate_secret_key(&req.secret)?;
+
+        let keypair =
+            Keypair::from_bytes(&secret_bytes).map_err(|_| "Failed to parse secret key")?;
+
+        let signature = keypair.sign_message(req.message.as_bytes());
+
+        Ok(SignMessageResponse {
+            success: true,
+            data: SignMessageData {
+                signature: STANDARD.encode(signature.as_ref()),
+                public_key: bs58::encode(keypair.pubkey().as_ref()).into_string(),
+                message: req.message.clone(),
+            },
+        })
+    })();
+
+    match result {
+        Ok(res) => HttpResponse::Ok().json(res),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
     }
-
-    let keypair = match Keypair::from_bytes(&secret_bytes) {
-        Ok(kp) => kp,
-        Err(_) => {
-            return HttpResponse::BadRequest().json(SignMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Failed to parse secret key".to_string()),
-            });
-        }
-    };
-
-    let signature = keypair.sign_message(req.message.as_bytes());
-
-    let data = SignMessageData {
-        signature: STANDARD.encode(signature.as_ref()),
-        public_key: bs58::encode(keypair.pubkey().as_ref()).into_string(),
-        message: req.message.clone(),
-    };
-
-    HttpResponse::Ok().json(SignMessageResponse {
-        success: true,
-        data: Some(data),
-        error: None,
-    })
 }
 
 #[derive(Deserialize)]
@@ -227,36 +225,41 @@ struct VerifyData {
 #[derive(Serialize)]
 struct VerifyMessageResponse {
     success: bool,
-    data: Option<VerifyData>,
-    error: Option<String>,
+    data: VerifyData,
 }
 
 #[post("/message/verify")]
 async fn verify_message(req: web::Json<VerifyMessageRequest>) -> impl Responder {
-    let result = (|| {
-        let pubkey = Pubkey::from_str(&req.pubkey)?;
-        let sig_bytes = STANDARD.decode(&req.signature)?;
-        let signature = Signature::try_from(&sig_bytes[..])?;
+    let result = (|| -> Result<VerifyMessageResponse, Box<dyn std::error::Error>> {
+        if req.message.is_empty() || req.signature.is_empty() || req.pubkey.is_empty() {
+            return Err("Missing required fields".into());
+        }
+
+        let pubkey = validate_pubkey(&req.pubkey)?;
+        let sig_bytes = STANDARD
+            .decode(&req.signature)
+            .map_err(|_| "Invalid base64 signature")?;
+        let signature =
+            Signature::try_from(&sig_bytes[..]).map_err(|_| "Invalid signature format")?;
+
         let is_valid = signature.verify(pubkey.as_ref(), req.message.as_bytes());
 
-        Ok::<_, Box<dyn std::error::Error>>(VerifyMessageResponse {
+        Ok(VerifyMessageResponse {
             success: true,
-            data: Some(VerifyData {
+            data: VerifyData {
                 valid: is_valid,
                 message: req.message.clone(),
                 pubkey: req.pubkey.clone(),
-            }),
-            error: None,
+            },
         })
     })();
 
     match result {
         Ok(res) => HttpResponse::Ok().json(res),
-        Err(e) => HttpResponse::BadRequest().json(VerifyMessageResponse {
-            success: false,
-            data: None,
-            error: Some(e.to_string()),
-        }),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
     }
 }
 
@@ -277,9 +280,17 @@ struct MintTokenResponse {
 #[post("/token/mint")]
 async fn mint_token(req: web::Json<MintTokenRequest>) -> impl Responder {
     let result = (|| -> Result<MintTokenResponse, Box<dyn std::error::Error>> {
-        let mint = Pubkey::from_str(&req.mint)?;
-        let destination = Pubkey::from_str(&req.destination)?;
-        let authority = Pubkey::from_str(&req.authority)?;
+        if req.mint.is_empty() || req.destination.is_empty() || req.authority.is_empty() {
+            return Err("Missing required fields".into());
+        }
+
+        if req.amount == 0 {
+            return Err("Amount must be greater than 0".into());
+        }
+
+        let mint = validate_pubkey(&req.mint)?;
+        let destination = validate_pubkey(&req.destination)?;
+        let authority = validate_pubkey(&req.authority)?;
 
         let ix = mint_to(
             &spl_token::id(),
@@ -305,7 +316,7 @@ async fn mint_token(req: web::Json<MintTokenRequest>) -> impl Responder {
             data: InstructionJson {
                 program_id: ix.program_id.to_string(),
                 accounts,
-                instruction_data: STANDARD.encode(&ix.data),
+                instruction_data: STANDARD.encode(ix.data.as_slice()),
             },
         })
     })();
@@ -327,39 +338,46 @@ struct SendSolRequest {
 }
 
 #[derive(Serialize)]
+struct SendSolData {
+    program_id: String,
+    accounts: Vec<String>,
+    instruction_data: String,
+}
+
+#[derive(Serialize)]
 struct SendSolResponse {
     success: bool,
-    data: InstructionJson,
+    data: SendSolData,
 }
 
 #[post("/send/sol")]
 async fn send_sol(req: web::Json<SendSolRequest>) -> impl Responder {
     let result = (|| -> Result<SendSolResponse, Box<dyn std::error::Error>> {
+        if req.from.is_empty() || req.to.is_empty() {
+            return Err("Missing required fields".into());
+        }
+
         if req.lamports == 0 {
             return Err("Lamports must be greater than 0".into());
         }
 
-        let from_pubkey = Pubkey::from_str(&req.from)?;
-        let to_pubkey = Pubkey::from_str(&req.to)?;
+        let from_pubkey = validate_pubkey(&req.from)?;
+        let to_pubkey = validate_pubkey(&req.to)?;
 
         let ix = system_instruction::transfer(&from_pubkey, &to_pubkey, req.lamports);
 
-        let accounts = ix
+        let accounts: Vec<String> = ix
             .accounts
             .iter()
-            .map(|meta| AccountMetaJson {
-                pubkey: meta.pubkey.to_string(),
-                is_signer: meta.is_signer,
-                is_writable: meta.is_writable,
-            })
+            .map(|meta| meta.pubkey.to_string())
             .collect();
 
         Ok(SendSolResponse {
             success: true,
-            data: InstructionJson {
+            data: SendSolData {
                 program_id: ix.program_id.to_string(),
                 accounts,
-                instruction_data: STANDARD.encode(ix.data),
+                instruction_data: STANDARD.encode(ix.data.as_slice()),
             },
         })
     })();
@@ -382,21 +400,39 @@ struct SendTokenRequest {
 }
 
 #[derive(Serialize)]
+struct SendTokenAccountMeta {
+    pubkey: String,
+    #[serde(rename = "isSigner")]
+    is_signer: bool,
+}
+
+#[derive(Serialize)]
+struct SendTokenData {
+    program_id: String,
+    accounts: Vec<SendTokenAccountMeta>,
+    instruction_data: String,
+}
+
+#[derive(Serialize)]
 struct SendTokenResponse {
     success: bool,
-    data: InstructionJson,
+    data: SendTokenData,
 }
 
 #[post("/send/token")]
 async fn send_token(req: web::Json<SendTokenRequest>) -> impl Responder {
     let result = (|| -> Result<SendTokenResponse, Box<dyn std::error::Error>> {
+        if req.destination.is_empty() || req.mint.is_empty() || req.owner.is_empty() {
+            return Err("Missing required fields".into());
+        }
+
         if req.amount == 0 {
             return Err("Amount must be greater than 0".into());
         }
 
-        let destination = Pubkey::from_str(&req.destination)?;
-        let mint = Pubkey::from_str(&req.mint)?;
-        let owner = Pubkey::from_str(&req.owner)?;
+        let destination = validate_pubkey(&req.destination)?;
+        let mint = validate_pubkey(&req.mint)?;
+        let owner = validate_pubkey(&req.owner)?;
 
         let source = spl_associated_token_account::get_associated_token_address(&owner, &mint);
 
@@ -412,19 +448,18 @@ async fn send_token(req: web::Json<SendTokenRequest>) -> impl Responder {
         let accounts = ix
             .accounts
             .iter()
-            .map(|meta| AccountMetaJson {
+            .map(|meta| SendTokenAccountMeta {
                 pubkey: meta.pubkey.to_string(),
                 is_signer: meta.is_signer,
-                is_writable: meta.is_writable,
             })
             .collect();
 
         Ok(SendTokenResponse {
             success: true,
-            data: InstructionJson {
+            data: SendTokenData {
                 program_id: ix.program_id.to_string(),
                 accounts,
-                instruction_data: STANDARD.encode(ix.data),
+                instruction_data: STANDARD.encode(ix.data.as_slice()),
             },
         })
     })();
