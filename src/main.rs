@@ -10,6 +10,7 @@ use solana_sdk::signer::Signer;
 use solana_sdk::signer::keypair::Keypair;
 use spl_token::instruction::initialize_mint;
 use spl_token::instruction::mint_to;
+use spl_token::instruction::transfer;
 use std::str::FromStr;
 
 #[derive(Serialize)]
@@ -212,8 +213,8 @@ async fn sign_message(req: web::Json<SignMessageRequest>) -> impl Responder {
 #[derive(Deserialize)]
 struct VerifyMessageRequest {
     message: String,
-    signature: String, // base64
-    pubkey: String,    // base58
+    signature: String,
+    pubkey: String,
 }
 
 #[derive(Serialize)]
@@ -276,7 +277,6 @@ struct MintTokenResponse {
 #[post("/token/mint")]
 async fn mint_token(req: web::Json<MintTokenRequest>) -> impl Responder {
     let result = (|| -> Result<MintTokenResponse, Box<dyn std::error::Error>> {
-        // Parse all pubkeys from base58 strings
         let mint = Pubkey::from_str(&req.mint)?;
         let destination = Pubkey::from_str(&req.destination)?;
         let authority = Pubkey::from_str(&req.authority)?;
@@ -373,6 +373,71 @@ async fn send_sol(req: web::Json<SendSolRequest>) -> impl Responder {
     }
 }
 
+#[derive(Deserialize)]
+struct SendTokenRequest {
+    destination: String,
+    mint: String,
+    owner: String,
+    amount: u64,
+}
+
+#[derive(Serialize)]
+struct SendTokenResponse {
+    success: bool,
+    data: InstructionJson,
+}
+
+#[post("/send/token")]
+async fn send_token(req: web::Json<SendTokenRequest>) -> impl Responder {
+    let result = (|| -> Result<SendTokenResponse, Box<dyn std::error::Error>> {
+        if req.amount == 0 {
+            return Err("Amount must be greater than 0".into());
+        }
+
+        let destination = Pubkey::from_str(&req.destination)?;
+        let mint = Pubkey::from_str(&req.mint)?;
+        let owner = Pubkey::from_str(&req.owner)?;
+
+        let source = spl_associated_token_account::get_associated_token_address(&owner, &mint);
+
+        let ix = transfer(
+            &spl_token::id(),
+            &source,
+            &destination,
+            &owner,
+            &[],
+            req.amount,
+        )?;
+
+        let accounts = ix
+            .accounts
+            .iter()
+            .map(|meta| AccountMetaJson {
+                pubkey: meta.pubkey.to_string(),
+                is_signer: meta.is_signer,
+                is_writable: meta.is_writable,
+            })
+            .collect();
+
+        Ok(SendTokenResponse {
+            success: true,
+            data: InstructionJson {
+                program_id: ix.program_id.to_string(),
+                accounts,
+                instruction_data: STANDARD.encode(ix.data),
+            },
+        })
+    })();
+
+    match result {
+        Ok(res) => HttpResponse::Ok().json(res),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
@@ -384,6 +449,7 @@ async fn main() -> std::io::Result<()> {
             .service(verify_message)
             .service(mint_token)
             .service(send_sol)
+            .service(send_token)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
