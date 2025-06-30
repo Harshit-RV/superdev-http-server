@@ -5,7 +5,9 @@ use base64::engine::general_purpose::STANDARD;
 use bs58;
 use serde::{Deserialize, Serialize};
 use solana_program::{instruction::Instruction, pubkey::Pubkey};
-use solana_sdk::signature::{Keypair, Signer};
+use solana_sdk::signature::Signature;
+use solana_sdk::signer::Signer;
+use solana_sdk::signer::keypair::Keypair;
 use spl_token::instruction::initialize_mint;
 use std::str::FromStr;
 
@@ -206,6 +208,94 @@ async fn sign_message(req: web::Json<SignMessageRequest>) -> impl Responder {
     })
 }
 
+#[derive(Deserialize)]
+struct VerifyMessageRequest {
+    message: String,
+    signature: String,
+    pubkey: String,
+}
+
+#[derive(Serialize)]
+struct VerifyMessageData {
+    valid: bool,
+    message: String,
+    pubkey: String,
+}
+
+#[derive(Serialize)]
+struct VerifyMessageResponse {
+    success: bool,
+    data: Option<VerifyMessageData>,
+    error: Option<String>,
+}
+
+#[post("/message/verify")]
+async fn verify_message(req: web::Json<VerifyMessageRequest>) -> impl Responder {
+    if req.message.is_empty() || req.signature.is_empty() || req.pubkey.is_empty() {
+        return HttpResponse::BadRequest().json(VerifyMessageResponse {
+            success: false,
+            data: None,
+            error: Some("Missing required fields".to_string()),
+        });
+    }
+
+    let pubkey_bytes = match bs58::decode(&req.pubkey).into_vec() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(VerifyMessageResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid base58 public key".to_string()),
+            });
+        }
+    };
+    let pubkey = match Pubkey::try_from(pubkey_bytes.as_slice()) {
+        Ok(pk) => pk,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(VerifyMessageResponse {
+                success: false,
+                data: None,
+                error: Some("Failed to parse public key".to_string()),
+            });
+        }
+    };
+
+    let sig_bytes = match STANDARD.decode(&req.signature) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(VerifyMessageResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid base64 signature".to_string()),
+            });
+        }
+    };
+    let signature = match Signature::try_from(sig_bytes.as_slice()) {
+        Ok(sig) => sig,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(VerifyMessageResponse {
+                success: false,
+                data: None,
+                error: Some("Failed to parse signature".to_string()),
+            });
+        }
+    };
+
+    let valid = signature.verify(pubkey.as_ref(), req.message.as_bytes());
+
+    let data = VerifyMessageData {
+        valid,
+        message: req.message.clone(),
+        pubkey: req.pubkey.clone(),
+    };
+
+    HttpResponse::Ok().json(VerifyMessageResponse {
+        success: true,
+        data: Some(data),
+        error: None,
+    })
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
@@ -214,6 +304,7 @@ async fn main() -> std::io::Result<()> {
             .service(greet_post)
             .service(create_token)
             .service(sign_message)
+            .service(verify_message)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
