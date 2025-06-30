@@ -2441,6 +2441,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "spl-token"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9eb465e4bf5ce1d498f05204c8089378c1ba34ef2777ea95852fc53a1fd4fb2"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "num-derive",
+ "num-traits",
+ "num_enum",
+ "solana-program",
+ "thiserror",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2463,10 +2478,13 @@ name = "superdev_http_server"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "base64 0.21.7",
  "bs58 0.5.1",
  "serde",
  "serde_json",
+ "solana-program",
  "solana-sdk",
+ "spl-token",
 ]
 
 [[package]]
