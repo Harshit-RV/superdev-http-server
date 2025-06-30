@@ -211,12 +211,12 @@ async fn sign_message(req: web::Json<SignMessageRequest>) -> impl Responder {
 #[derive(Deserialize)]
 struct VerifyMessageRequest {
     message: String,
-    signature: String,
-    pubkey: String,
+    signature: String, // base64
+    pubkey: String,    // base58
 }
 
 #[derive(Serialize)]
-struct VerifyMessageData {
+struct VerifyData {
     valid: bool,
     message: String,
     pubkey: String,
@@ -225,75 +225,37 @@ struct VerifyMessageData {
 #[derive(Serialize)]
 struct VerifyMessageResponse {
     success: bool,
-    data: Option<VerifyMessageData>,
+    data: Option<VerifyData>,
     error: Option<String>,
 }
 
 #[post("/message/verify")]
 async fn verify_message(req: web::Json<VerifyMessageRequest>) -> impl Responder {
-    if req.message.is_empty() || req.signature.is_empty() || req.pubkey.is_empty() {
-        return HttpResponse::BadRequest().json(VerifyMessageResponse {
+    let result = (|| {
+        let pubkey = Pubkey::from_str(&req.pubkey)?;
+        let sig_bytes = STANDARD.decode(&req.signature)?;
+        let signature = Signature::try_from(&sig_bytes[..])?;
+        let is_valid = signature.verify(pubkey.as_ref(), req.message.as_bytes());
+
+        Ok::<_, Box<dyn std::error::Error>>(VerifyMessageResponse {
+            success: true,
+            data: Some(VerifyData {
+                valid: is_valid,
+                message: req.message.clone(),
+                pubkey: req.pubkey.clone(),
+            }),
+            error: None,
+        })
+    })();
+
+    match result {
+        Ok(res) => HttpResponse::Ok().json(res),
+        Err(e) => HttpResponse::BadRequest().json(VerifyMessageResponse {
             success: false,
             data: None,
-            error: Some("Missing required fields".to_string()),
-        });
+            error: Some(e.to_string()),
+        }),
     }
-
-    let pubkey_bytes = match bs58::decode(&req.pubkey).into_vec() {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return HttpResponse::BadRequest().json(VerifyMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Invalid base58 public key".to_string()),
-            });
-        }
-    };
-    let pubkey = match Pubkey::try_from(pubkey_bytes.as_slice()) {
-        Ok(pk) => pk,
-        Err(_) => {
-            return HttpResponse::BadRequest().json(VerifyMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Failed to parse public key".to_string()),
-            });
-        }
-    };
-
-    let sig_bytes = match STANDARD.decode(&req.signature) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return HttpResponse::BadRequest().json(VerifyMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Invalid base64 signature".to_string()),
-            });
-        }
-    };
-    let signature = match Signature::try_from(sig_bytes.as_slice()) {
-        Ok(sig) => sig,
-        Err(_) => {
-            return HttpResponse::BadRequest().json(VerifyMessageResponse {
-                success: false,
-                data: None,
-                error: Some("Failed to parse signature".to_string()),
-            });
-        }
-    };
-
-    let valid = signature.verify(pubkey.as_ref(), req.message.as_bytes());
-
-    let data = VerifyMessageData {
-        valid,
-        message: req.message.clone(),
-        pubkey: req.pubkey.clone(),
-    };
-
-    HttpResponse::Ok().json(VerifyMessageResponse {
-        success: true,
-        data: Some(data),
-        error: None,
-    })
 }
 
 #[actix_web::main]
