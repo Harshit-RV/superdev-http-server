@@ -1,4 +1,5 @@
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
+use base64;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bs58;
@@ -130,6 +131,81 @@ async fn create_token(req: web::Json<CreateTokenRequest>) -> impl Responder {
     }
 }
 
+#[derive(Deserialize)]
+struct SignMessageRequest {
+    message: String,
+    secret: String,
+}
+
+#[derive(Serialize)]
+struct SignMessageData {
+    signature: String,
+    public_key: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct SignMessageResponse {
+    success: bool,
+    data: Option<SignMessageData>,
+    error: Option<String>,
+}
+
+#[post("/message/sign")]
+async fn sign_message(req: web::Json<SignMessageRequest>) -> impl Responder {
+    if req.message.is_empty() || req.secret.is_empty() {
+        return HttpResponse::BadRequest().json(SignMessageResponse {
+            success: false,
+            data: None,
+            error: Some("Missing required fields".to_string()),
+        });
+    }
+
+    let secret_bytes = match bs58::decode(&req.secret).into_vec() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(SignMessageResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid base58 secret key".to_string()),
+            });
+        }
+    };
+
+    if secret_bytes.len() != 64 {
+        return HttpResponse::BadRequest().json(SignMessageResponse {
+            success: false,
+            data: None,
+            error: Some("Secret key must be 64 bytes (base58-encoded)".to_string()),
+        });
+    }
+
+    let keypair = match Keypair::from_bytes(&secret_bytes) {
+        Ok(kp) => kp,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(SignMessageResponse {
+                success: false,
+                data: None,
+                error: Some("Failed to parse secret key".to_string()),
+            });
+        }
+    };
+
+    let signature = keypair.sign_message(req.message.as_bytes());
+
+    let data = SignMessageData {
+        signature: STANDARD.encode(signature.as_ref()),
+        public_key: bs58::encode(keypair.pubkey().as_ref()).into_string(),
+        message: req.message.clone(),
+    };
+
+    HttpResponse::Ok().json(SignMessageResponse {
+        success: true,
+        data: Some(data),
+        error: None,
+    })
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
@@ -137,6 +213,7 @@ async fn main() -> std::io::Result<()> {
             .service(greet)
             .service(greet_post)
             .service(create_token)
+            .service(sign_message)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
